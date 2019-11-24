@@ -1,9 +1,11 @@
-;;;; key-mode.el -- A mode for KeY files.
+;;; key-mode.el --- A mode for KeY files
 
 ;; Copyright (C) 2019 Alexander Weigl <weigl@kit.edu>
-;; URL: https://github.com/KeYProject/key-mode
+;; URL: https://github.com/wadoon/key-mode
 ;; Version: 0.1
 ;; Keywords: languages
+;; Package-Requires: ((emacs "24.3"))
+;; Package-Version: 0
 
 ;;; Usage:
 ;; Put the following code in your .emacs, site-load.el, or other relevant file
@@ -19,9 +21,7 @@
 ;; 
 ;; - syntax highlighting 
 ;; - auto completion of keywords and sorts, functions, and predicates defined in the ldts
-;;   via company-mode
-;; - planned: flycheck support
-;; - planned: snippets
+;; - snippets
 
 ;;; License:
 ;; Permission is hereby granted, free of charge, to any person obtaining
@@ -44,6 +44,9 @@
 ;; WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ;;; Code:
+
+(require 'cl-lib)
+
 
 (defvar key-mode-keymap nil
   "The mode map for key-mode.")
@@ -146,7 +149,6 @@
 ;; Create the keymap for this mode.
 (setq key-mode-mode-map
   (let ((map (make-sparse-keymap)))
-    (define-key map "\e\t" 'ispell-complete-word)
     map))
 
 (define-derived-mode key-mode prog-mode "KeY"
@@ -181,7 +183,6 @@ path to the jar file, set `flycheck-key-executable'.  See URL
 (eval-after-load 'flycheck #'key-mode--flycheck)
 ;;
 
-(require 'cl-lib)
 (setq key-mode--completions
       `(;; ("keywords" .
 	,@(mapcar (lambda (x) (list x "keyword" "")) key-mode--keywords)
@@ -494,7 +495,7 @@ path to the jar file, set `flycheck-key-executable'.  See URL
   (interactive (list 'interactive))
   (cl-case command
     (interactive (company-begin-backend 'company-key-backend))
-    (prefix (and ;(eq major-mode 'fundamental-mode)
+    (prefix (and (eq major-mode 'key-mode)
 	     (company-grab-symbol)))
     
     (candidates
@@ -518,3 +519,4 @@ path to the jar file, set `flycheck-key-executable'.  See URL
 
 
 (provide 'key-mode)
+;;; key-mode.el ends here
