@@ -1,3 +1,5 @@
+# Taken from emacs-buttercup
+
 EMACS := emacs
 VERSION := $(shell sed -ne 's/^;; Version: \(.*\)/\1/p' key-mode.el)
 ELISP_FILES := $(shell ls *.el | grep -v -- '-pkg\.el$$')
