@@ -82,45 +82,21 @@
             "\\isAbstractOrInterface" "\\containerType" "\\locset" "\\seq" "\\bigint"
             "\u227A" "\u220A" "\u2205" "\u222A" "\u2229" "\u2286" "\u2216"))
 
-;; (defvar key-mode-toplevel-keywords nil "Toplevel keywords.")
-;; (defvar key-mode-taclet-keywords nil "Taclet keywords.")
+(defconst key-mode-toplevel-keywords
+  (regexp-opt '("\\javaSource" "\\chooseContract" "\\proofObligation"
+                "\\bootclasspath" "\\problem" "\\include"
+                "\\includeldt" "\\sorts" "\\profile" "\\preferences"
+                "\\predicates" "\\functions" "\\withoptions" "\\programVariables")
+	      t)
+  "Toplevel keywords.")
 
-;; (regexp-opt '("\\javaSource"
-;; 	       "\\chooseContract"
-;; 	       "\\proofObligation"
-;; 	       "\\bootclasspath"
-;; 	       "\\problem"
-;; 	       "\\include"
-;;                "\\includeldt"
-;; 	       "\\sorts"
-;;                "\\profile"
-;;                "\\preferences"
-;;                "\\predicates"
-;;                "\\functions"
-;;                "\\withoptions"
-;; 	       "\\programVariables")
-;; 	      t))
-;; (regexp-opt '("\\find" "\\assumes"
-;;       	"\\modality"
-;;       	"\\replacewith"
-;;       	"\\add"
-;;       	"\\heuristics"
-;;       	"\\endmodality"
-;;       	"\\varcond"
-;;       	"\\not"
-;;       	"\\hasSort"
-;;       	"\\isThisReference"
-;;       	"\\staticMethodReference"
-;;       	"\\displayname"
-;;       	"\\sameUpdateLevel"
-;;       	"schemaVar"
-;;       	"\\modalOperator"
-;;       	"\\new"
-;;       	"\\typeof"
-;;       	"\\term"
-;;       	"\\update"
-;;       	"\\formula")
-;;             t))
+(defconst key-mode-taclet-keywords
+  (regexp-opt '("\\find" "\\assumes" "\\modality" "\\replacewith"
+            	"\\add" "\\heuristics" "\\endmodality" "\\varcond"
+            	"\\not" "\\hasSort" "\\isThisReference" "\\staticMethodReference"
+            	"\\displayname" "\\sameUpdateLevel" "schemaVar" "\\modalOperator"
+            	"\\new" "\\typeof" "\\term" "\\update" "\\formula")
+                  t) "Keywords within taclets")
 
 (setq key-mode-font-lock
       (let ((keywords-re (regexp-opt key-mode--keywords t)))
@@ -151,22 +127,436 @@
   (let ((map (make-sparse-keymap)))
     map))
 
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Indentation
+;; Taken and adatped from julia-mode
+;;   https://github.com/JuliaEditorSupport/julia-emacs/blob/master/julia-mode.el
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+(defcustom key-indent-offset 4
+  "Number of spaces per indentation level."
+  :type 'integer
+  :group 'key-mode)
+
+(defun key-mode--in-comment (&optional syntax-ppss)
+  "Return non-nil if point is inside a comment using SYNTAX-PPSS.
+Handles both single-line and multi-line comments."
+  (nth 4 (or syntax-ppss (syntax-ppss))))
+
+(defun key-mode--in-string (&optional syntax-ppss)
+  "Return non-nil if point is inside a string using SYNTAX-PPSS.
+Note this is Emacs' notion of what is highlighted as a string.
+As a result, it is true inside \"foo\", `foo` and 'f'."
+  (nth 3 (or syntax-ppss (syntax-ppss))))
+
+(defun key-mode-in-brackets ()
+  "Return non-nil if point is inside square brackets."
+  (let ((start-pos (point))
+        (open-count 0))
+    ;; Count all the [ and ] characters on the current line.
+    (save-excursion
+      (beginning-of-line)
+
+      (while (< (point) start-pos)
+        ;; Don't count [ or ] inside strings, characters or comments.
+        (unless (or (key-mode-in-string) (key-mode-in-comment))
+
+          (when (looking-at (rx "["))
+            (incf open-count))
+          (when (looking-at (rx "]"))
+            (decf open-count)))
+
+        (forward-char 1)))
+
+    ;; If we've opened more than we've closed, we're inside brackets.
+    (plusp open-count)))
+
+(defun key-mode-at-keyword (kw-list)
+  "Return the word at point if it matches any keyword in KW-LIST.
+KW-LIST is a list of strings.  The word at point is not considered
+a keyword if used as a field name, X.word, or quoted, :word."
+  (and (or (= (point) 1)
+	   (and (not (equal (char-before (point)) ?.))
+		(not (equal (char-before (point)) ?:))))
+       (not (looking-at "("))           ; handle "function(" when on (
+       (member (current-word t) kw-list)
+       ;; 'end' is not a keyword when used for indexing, e.g. foo[end-2]
+       (or (not (equal (current-word t) "end"))
+           (not (key-mode-in-brackets)))
+       (not (key-mode-in-comment))))
+
+
+(defun key-mode-safe-backward-sexp ()
+  "if backward-sexp gives an error, move back 1 char to move over the '('."
+  (if (condition-case nil (backward-sexp) (error t))
+      (ignore-errors (backward-char))))
+
+(defun key-mode-following-import-export-using ()
+  "If the current line follows an `export` or `import` keyword
+with valid syntax, return the position of the keyword, otherwise
+`nil`. Works by stepping backwards through comma-separated
+symbol, gives up when this is not true."
+  ;; Implementation accepts a single Module: right after the keyword, and saves
+  ;; the module name for future use, but does not enforce that `export` has no
+  ;; module name.
+  (let ((done nil)                      ; find keyword or give up
+        (module nil))                   ; found "Module:"
+    (save-excursion
+      (beginning-of-line)
+      (while (and (not done) (< (point-min) (point)))
+        (key-mode-safe-backward-sexp)
+        (cond
+         ((looking-at (rx (or "import" "export" "using")))
+          (setf done (point)))
+         ((looking-at (rx (group (* (or word (syntax symbol)))) (0+ space) ":"))
+          (if module
+              (setf done 'broken)
+            (setf module (match-string-no-properties 1))))
+         ((looking-at (rx (* (or word (syntax symbol))) (0+ space) ","))
+          (when module (setf done 'broken)))
+         (t (setf done 'broken)))))
+    (if (eq done 'broken)
+        nil
+      done)))
+
+(defun key-mode-last-open-block-pos (min)
+  "Return the position of the last open block, if one found.
+Do not move back beyond position MIN."
+  (save-excursion
+    (let ((count 0))
+      (while (not (or (> count 0) (<= (point) min)))
+        (key-mode-safe-backward-sexp)
+        (setq count
+              (cond ((key-mode-at-keyword key-mode-block-start-keywords)
+                     (+ count 1))
+                    ((and (equal (current-word t) "end")
+                          (not (key-mode-in-comment)))
+                     (- count 1))
+                    (t count))))
+      (if (> count 0)
+          (point)
+        nil))))
+
+(defun key-mode-last-open-block (min)
+  "Move back and return indentation level for last open block.
+Do not move back beyond MIN."
+  ;; Ensure MIN is not before the start of the buffer.
+  (setq min (max min (point-min)))
+  (let ((pos (key-mode-last-open-block-pos min)))
+    (and pos
+	 (progn
+	   (goto-char pos)
+	   (+ key-mode-indent-offset (current-indentation))))))
+
+(defsubst key-mode--safe-backward-char ()
+  "Move back one character, but don't error if we're at the
+beginning of the buffer."
+  (unless (eq (point) (point-min))
+    (backward-char)))
+
+(defcustom key-mode-max-block-lookback 5000
+  "When indenting, don't look back more than this
+many characters to see if there are unclosed blocks.
+This variable has a moderate effect on indent performance if set too
+high, but stops indenting in the middle of long blocks if set too low."
+  :type 'integer
+  :group 'julia)
+
+(defun key-mode-paren-indent ()
+  "Return the column of the text following the innermost
+containing paren before point, so we can align succeeding code
+with it. Returns nil if we're not within nested parens."
+  (save-excursion
+    (beginning-of-line)
+    (let ((parser-state (syntax-ppss)))
+      (cond ((nth 3 parser-state) nil)       ;; strings
+            ((= (nth 0 parser-state) 0) nil) ;; top level
+            (t
+             (ignore-errors ;; return nil if any of these movements fail
+               (beginning-of-line)
+               (skip-syntax-forward " ")
+               (let ((possibly-close-paren-point (point)))
+                 (backward-up-list)
+                 (let ((open-paren-point (point)))
+                   (forward-char)
+                   (skip-syntax-forward " ")
+                   (if (eolp)
+                       (progn
+                         (up-list)
+                         (backward-char)
+                         (let ((paren-closed (= (point) possibly-close-paren-point)))
+                           (goto-char open-paren-point)
+                           (beginning-of-line)
+                           (skip-syntax-forward " ")
+                           (+ (current-column)
+                              (if paren-closed
+                                  0
+                                key-mode-indent-offset))))
+                     (current-column))))))))))
+
+(defun key-mode-prev-line-skip-blank-or-comment ()
+  "Move point to beginning of previous line skipping blank lines
+and lines including only comments. Returns number of lines moved.
+A return of -1 signals that we moved to the first line of
+the (possibly narrowed) buffer, so there is nowhere else to go."
+  (catch 'result
+    (let ((moved 0) this-move)
+      (while t
+        (setq this-move (forward-line -1))
+        (cond
+         ;; moved into comment or blank
+         ((and (= 0 this-move)
+               (or (looking-at-p "^\\s-*\\(?:#.*\\)*$")
+                   (key-mode-in-comment)))
+          (incf moved))
+         ;; success
+         ((= 0 this-move)
+          (throw 'result (1+ moved)))
+         ;; on first line and in comment
+         ((and (bobp)
+               (or (looking-at-p "^\\s-*\\(?:#.*\\)*$")
+                   (key-mode-in-comment)))
+          (throw 'result -1))
+         ((bobp)
+          (throw 'result moved))
+         (t
+          (throw 'result 0)))))))
+
+(defun key-mode-indent-hanging ()
+  "Calculate indentation for lines that follow \"hanging\"
+operators (operators that end the previous line) as defined in
+`key-mode-hanging-operator-regexp'. An assignment operator ending
+the previous line increases the indent as do the other operators
+unless another operator is found two lines up. Previous line
+means previous line after skipping blank lines and lines with
+only comments."
+  (let (prev-indent)
+    (save-excursion
+      (when (> (key-mode-prev-line-skip-blank-or-comment) 0)
+        (setq prev-indent (current-indentation))
+        (when (looking-at-p key-mode-hanging-operator-regexp)
+          (if (and (> (key-mode-prev-line-skip-blank-or-comment) 0)
+                   (looking-at-p key-mode-hanging-operator-regexp))
+              ;; two preceding hanging operators => indent same as line
+              ;; above
+              prev-indent
+            ;; one preceding hanging operator => increase indent from line
+            ;; above
+            (+ key-mode-indent-offset prev-indent)))))))
+
+(defun key-mode-indent-in-string ()
+  "Indentation inside strings with newlines is \"manual\",
+meaning always increase indent on TAB and decrease on S-TAB."
+  (save-excursion
+    (beginning-of-line)
+    (when (key-mode-in-string)
+      (if (member this-command '(key-mode-latexsub-or-indent
+                                 ess-indent-or-complete))
+          (+ key-mode-indent-offset (current-indentation))
+        ;; return the current indentation to prevent other functions from
+        ;; indenting inside strings
+        (current-indentation)))))
+
+(defun key-mode-indent-import-export-using ()
+  "Indent offset for lines that follow `import` or `export`, otherwise nil."
+  (when (key-mode-following-import-export-using)
+    key-mode-indent-offset))
+
+(defun key-indent-line ()
+  "Indent current line of julia code."
+  (interactive)
+  (let* ((point-offset (- (current-column) (current-indentation))))
+    (indent-line-to
+     (or
+      ;; note: if this first function returns nil the beginning of the line
+      ;; cannot be in a string
+      (key-mode-indent-in-string)
+      ;; If we're inside an open paren, indent to line up arguments. After this,
+      ;; we cannot be inside parens which includes brackets
+      (key-mode-paren-indent)
+      ;; indent due to hanging operators (lines ending in an operator)
+      (key-mode-indent-hanging)
+      ;; indent for import and export
+      (key-mode-indent-import-export-using)
+      ;; Indent according to how many nested blocks we are in.
+      (save-excursion
+        (beginning-of-line)
+        ;; jump out of any comments
+        (let ((state (syntax-ppss)))
+          (when (nth 4 state)
+            (goto-char (nth 8 state))))
+        (forward-to-indentation 0)
+        (let ((endtok (key-mode-at-keyword key-mode-block-end-keywords))
+              (last-open-block (key-mode-last-open-block (- (point) key-mode-max-block-lookback))))
+          (max 0 (+ (or last-open-block 0)
+                    (if (or endtok
+                            (key-mode-at-keyword key-mode-block-start-keywords-no-indent))
+                        (- key-mode-indent-offset) 0)))))))
+    ;; Point is now at the beginning of indentation, restore it
+    ;; to its original position (relative to indentation).
+    (when (>= point-offset 0)
+      (move-to-column (+ (current-indentation) point-offset)))))
+
+(defalias 'key-mode-mode-prog-mode
+  (if (fboundp 'prog-mode)
+      'prog-mode
+    'fundamental-mode))
+
+
+
+(defun key-mode-syntax-context-type (&optional syntax-ppss)
+  "Return the context type using SYNTAX-PPSS.
+TYPE can be `comment', `string' or `paren'."
+  (let ((ppss (or syntax-ppss (syntax-ppss))))
+    (cond
+     ((nth 8 ppss) (if (nth 4 ppss) 'comment 'string))
+     ((nth 1 ppss) 'paren))))
+
+(defsubst key-mode-syntax-comment-or-string-p (&optional syntax-ppss)
+  "Return non-nil if SYNTAX-PPSS is inside string or comment."
+  (nth 8 (or syntax-ppss (syntax-ppss))))
+
+(defun key-mode-looking-at-beginning-of-defun (&optional syntax-ppss)
+  "Check if point is at `beginning-of-defun' using SYNTAX-PPSS."
+  (and (not (key-mode-syntax-comment-or-string-p (or syntax-ppss (syntax-ppss))))
+       (save-excursion
+         (beginning-of-line 1)
+         (looking-at key-mode-beginning-of-defun-regex))))
+
+(defun key-mode--beginning-of-defun (&optional arg)
+  "Internal implementation of `key-mode-beginning-of-defun'.
+With positive ARG search backwards, else search forwards."
+  (when (or (null arg) (= arg 0)) (setq arg 1))
+  (let* ((re-search-fn (if (> arg 0)
+                           #'re-search-backward
+                         #'re-search-forward))
+         (line-beg-pos (line-beginning-position))
+         (line-content-start (+ line-beg-pos (current-indentation)))
+         (pos (point-marker))
+         (beg-indentation
+          (and (> arg 0)
+               (save-excursion
+                 (while (and (not (key-mode-looking-at-beginning-of-defun))
+                             ;; f(x) = ... function bodies may span multiple lines
+                             (or (and (key-mode-indent-hanging)
+                                      (forward-line -1))
+                                 ;; inside dangling parameter list
+                                 (and (eq 'paren (key-mode-syntax-context-type))
+                                      (backward-up-list))
+                                 (key-mode-last-open-block (point-min)))))
+                 (or (and (key-mode-looking-at-beginning-of-defun)
+                          (+ (current-indentation) key-mode-indent-offset))
+                     0))))
+         (found
+          (progn
+            (when (and (< arg 0)
+                       (key-mode-looking-at-beginning-of-defun))
+              (end-of-line 1))
+            (while (and (funcall re-search-fn
+                                 key-mode-beginning-of-defun-regex nil t)
+                        (or (key-mode-syntax-comment-or-string-p)
+                            ;; handle nested defuns when moving backwards
+                            ;; by checking matching indentation
+                            (and (> arg 0)
+                                 (not (= (current-indentation) 0))
+                                 (>= (current-indentation) beg-indentation)))))
+            (and (key-mode-looking-at-beginning-of-defun)
+                 (or (not (= (line-number-at-pos pos)
+                             (line-number-at-pos)))
+                     (and (>= (point) line-beg-pos)
+                          (<= (point) line-content-start)
+                          (> pos line-content-start)))))))
+    (if found
+        (or (beginning-of-line 1) (point))
+      (and (goto-char pos) nil))))
+
+(defun key-mode-beginning-of-defun (&optional arg)
+  "Move point to `beginning-of-defun'.
+With positive ARG search backwards else search forward.
+ARG nil or 0 defaults to 1.  When searching backwards,
+nested defuns are handled depending on current point position.
+Return non-nil (point) if point moved to `beginning-of-defun'."
+  (when (or (null arg) (= arg 0)) (setq arg 1))
+  (let ((found))
+    (while (and (not (= arg 0))
+                (let ((keep-searching-p
+                       (key-mode--beginning-of-defun arg)))
+                  (when (and keep-searching-p (null found))
+                    (setq found t))
+                  keep-searching-p))
+      (setq arg (if (> arg 0) (1- arg) (1+ arg))))
+    found))
+
+(defun key-mode-end-of-defun (&optional arg)
+  "Move point to the end of the current function.
+Return nil if point is not in a function, otherwise point."
+  (interactive)
+  (let ((beg-defun-indent)
+        (beg-pos (point)))
+    (when (or (key-mode-looking-at-beginning-of-defun)
+              (key-mode-beginning-of-defun 1)
+              (key-mode-beginning-of-defun -1))
+      (beginning-of-line)
+      (if (looking-at-p key-mode-function-assignment-regex)
+          ;; f(x) = ...
+          (progn
+            ;; skip any dangling lines
+            (while (and (forward-line)
+                        (not (eobp))
+                        (or (key-mode-indent-hanging)
+                            ;; dangling closing paren
+                            (and (eq 'paren (key-mode-syntax-context-type))
+                                 (search-forward ")"))))))
+        ;; otherwise skip forward to matching indentation (not in string/comment)
+        (setq beg-defun-indent (current-indentation))
+        (while (and (not (eobp))
+                    (forward-line 1)
+                    (or (key-mode-syntax-comment-or-string-p)
+                        (> (current-indentation) beg-defun-indent)))))
+      (end-of-line)
+      (point))))
+
+(defun key-manual-deindent ()
+  "Deindent by `julia-indent-offset' regardless of current
+indentation context. To be used to manually indent inside
+strings."
+  (interactive)
+  (indent-line-to (max 0 (- (current-indentation) julia-indent-offset))))
+(define-key key-mode-map (kbd "<backtab>") 'key-manual-deindent)
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Final registration
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+
+;;;###autoload
+(add-to-list 'auto-mode-alist '("\\.key\\'" . key-mode))
+(add-to-list 'auto-mode-alist '("\\.key.proof\\'" . key-mode))
+
+
 (define-derived-mode key-mode prog-mode "KeY"
   "A major mode for editing KeY files"
   :syntax-table key-mode-syntax-table
+  ;;:keymap `(,(kbd "TAB") . c-indent-line-or-region)
 
+  (set (make-local-variable 'comment-start-skip) "//+\\s-*")
+  ;;(set (make-local-variable 'beginning-of-defun-function) #'julia-beginning-of-defun)
+  ;;(set (make-local-variable 'end-of-defun-function) #'julia-end-of-defun)
+  (setq indent-tabs-mode nil)
+  (imenu-add-to-menubar "Imenu")
 
-  ;(set (make-local-variable 'text-mode-variant) t)
-  ;(set (make-local-variable 'require-final-newline') mode-require-final-newline)
-  ;(set (make-local-variable 'indent-line-function) 'indent-relative)
+  (set (make-local-variable 'indent-line-function) 'key-indent-line)
+  ;;(set (make-local-variable 'indent-region-function) 'key-indent-region)
   (make-local-variable 'comment-start)
   (setq comment-start "//")
   (set (make-local-variable 'font-lock-defaults) '(key-mode-font-lock))
   (setq font-lock-keywords key-mode-font-lock)
-  (font-lock-fontify-buffer))
+  (font-lock-flush))
 
 
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Flycheck support
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
 (defun key-mode--flycheck ()
   (flycheck-define-checker
    key
@@ -182,6 +572,12 @@ path to the jar file, set `flycheck-key-executable'.  See URL
 
 (eval-after-load 'flycheck #'key-mode--flycheck)
 ;;
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Company support
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
 
 (setq key-mode--completions
       `(;; ("keywords" .
